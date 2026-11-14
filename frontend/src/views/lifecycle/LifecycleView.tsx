@@ -1,160 +1,172 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 
-import { downloadEntries, listEntries, moduleMeta, runAction as applyAction } from '@/api/local-service'
-import type { EntryRow } from '@/data/types'
+import {
+  advanceLifecycleStage,
+  listHits,
+  listLifecycles,
+  listPlans,
+  resetExperimentDomain,
+} from '@/api/experiment-service'
+import type { ActionResult, LifecycleModel } from '@/data/abtest-types'
+import { HitStateBadge, LifecycleStageTrack } from '@/components/experiment-ui'
 
-const meta = moduleMeta('lifecycle')
-const columns = [
-  "模型编号",
-  "模型名称",
-  "生命周期阶段",
-  "阶段定义事件",
-  "阶段停留阈值",
-  "流转条件",
-  "流失周期天",
-  "回归条件"
-]
-const actions = [
-  "提交模型评审",
-  "启用模型",
-  "下线模型"
-]
-const statuses = [
-  "草稿",
-  "模型评审中",
-  "已启用",
-  "已下线"
-]
-const stats = [
-  {
-    "label": "生命周期模型总数",
-    "value": 0
-  },
-  {
-    "label": "已启用模型",
-    "value": 0
-  },
-  {
-    "label": "模型评审中",
-    "value": 0
-  }
-]
+type Notice = { kind: 'info' | 'warn' | 'error' | 'success'; text: string }
 
 export default function LifecycleView() {
-  const [rows, setRows] = useState<EntryRow[]>([])
-  const [total, setTotal] = useState(0)
-  const [errorMessage, setErrorMessage] = useState('')
-  const [filters, setFilters] = useState<Record<string, string>>({})
-  const filterFields = useMemo(() => columns.slice(0, 3), [])
+  const [version, setVersion] = useState(0)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [advanceAt, setAdvanceAt] = useState('')
 
-  const reload = useCallback(() => {
-    setErrorMessage('')
-    try {
-      const payload = listEntries(meta.key, filters)
-      setRows(payload.items)
-      setTotal(payload.total)
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : '生命周期列表读取失败')
+  const models = useMemo(() => listLifecycles(), [version])
+  const plans = useMemo(() => listPlans(), [version])
+  const hits = useMemo(() => listHits(), [version])
+  const refresh = useCallback(() => setVersion((v) => v + 1), [])
+
+  function showResult(result: ActionResult<unknown>) {
+    setNotice({ kind: result.ok ? 'success' : 'error', text: result.message })
+    if (result.ok) {
+      refresh()
     }
-  }, [filters])
+  }
 
-  useEffect(() => {
-    reload()
-  }, [reload])
+  function handleAdvance(model: LifecycleModel) {
+    showResult(
+      advanceLifecycleStage(model.id, {
+        expectedVersion: model.version,
+        at: advanceAt.trim() || undefined,
+      }),
+    )
+  }
 
-  function runAction(action: string, row: EntryRow) {
-    setErrorMessage('')
-    const result = applyAction(meta.key, Number(row.id), action)
-    if (!result.ok) {
-      setErrorMessage(result.message)
-      return
-    }
-    reload()
+  function handleReset() {
+    showResult(resetExperimentDomain())
+    setAdvanceAt('')
   }
 
   return (
     <section className="page" data-module="lifecycle">
       <header className="page-head">
         <div>
-          <h2>生命周期管理</h2>
-          <p className="page-desc">定义用户或业务对象的生命周期模型，追踪从获客到流失各阶段的转化和流转。</p>
+          <h2>生命周期管理 · 实验资格联动</h2>
+          <p className="page-desc">
+            阶段单向推进；进入无资格阶段时，绑定方案的在组分组在同一次提交内退出。退出为终态，后续推进不会把用户拉回旧方案。
+          </p>
         </div>
         <div className="page-actions">
-          <button className="btn primary" type="button" onClick={() => setErrorMessage('生命周期模型登记入口尚未接入审批流')}>
-            登记生命周期模型
-          </button>
-          <button className="btn" type="button" onClick={() => downloadEntries(meta.key)}>
-            导出生命周期清单
-          </button>
+          <button className="btn" type="button" onClick={refresh}>刷新数据</button>
+          <button className="btn ghost" type="button" onClick={handleReset}>重置实验域</button>
         </div>
       </header>
 
-      <div className="stat-row">
-        {stats.map((item) => (
-          <article key={item.label} className="stat-card">
-            <span className="stat-label">{item.label}</span>
-            <strong className="stat-value">{item.value}</strong>
-          </article>
-        ))}
-      </div>
+      {notice && <div className={`notice notice-${notice.kind}`}>{notice.text}</div>}
 
-      <p className="status-legend">
-        {statuses.map((status: string) => (
-          <span key={status} className="legend-item">
-            {status}：{rows.filter((row) => String(row.status) === status).length}
-          </span>
-        ))}
-      </p>
-
-      <form className="filter-bar" onSubmit={(event) => { event.preventDefault(); reload() }}>
-        {filterFields.map((field) => (
-          <label key={field} className="filter-item">
-            <span>{field}</span>
+      <div className="domain-panel">
+        <h3>① 生命周期模型与阶段推进</h3>
+        <div className="demo-bar" style={{ marginBottom: 10 }}>
+          <label className="kv-item" style={{ margin: 0 }}>
+            <span className="kv-key">推进时间（留空取当前，格式 2026-11-12 19:05）</span>
             <input
-              value={filters[field] ?? ''}
-              placeholder={`按${field}检索`}
-              onChange={(event) => setFilters((prev) => ({ ...prev, [field]: event.target.value }))}
+              className="inline-input"
+              value={advanceAt}
+              placeholder="2026-11-12 19:05"
+              onChange={(e) => setAdvanceAt(e.target.value)}
             />
           </label>
-        ))}
-        <button className="btn" type="submit">查询</button>
-        <button className="btn ghost" type="button" onClick={() => setFilters({})}>重置条件</button>
-      </form>
+        </div>
 
-      <table className="data-table">
-        <thead>
-          <tr>
-            {columns.map((column) => <th key={column}>{column}</th>)}
-            <th>当前状态</th>
-            <th>可执行动作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
-              <td>{row.status}</td>
-              <td className="row-actions">
-                {actions.map((action) => (
-                  <button key={action} className="link" type="button" onClick={() => runAction(action, row)}>
-                    {action}
+        {models.map((model) => {
+          const atLast = model.stageOrder >= model.stages.length
+          return (
+            <article key={model.id} className="domain-panel" style={{ background: '#fbfdff' }}>
+              <h4>
+                <span className="mono">{model.modelCode}</span> · {model.modelName}
+                <span className="badge badge-live" style={{ marginLeft: 8 }}>{model.status}</span>
+                <span className="muted mono" style={{ marginLeft: 8, fontSize: 12 }}>v{model.version}</span>
+              </h4>
+              <LifecycleStageTrack model={model} />
+              <div className="kv-grid">
+                <div className="kv-item"><span className="kv-key">当前阶段</span><span className="kv-val">{model.currentStage}（第 {model.stageOrder}/{model.stages.length} 阶段）</span></div>
+                <div className="kv-item"><span className="kv-key">阶段停留阈值</span><span className="kv-val">{model.stageStayThreshold}</span></div>
+                <div className="kv-item"><span className="kv-key">流失周期天</span><span className="kv-val">{model.churnCycleDays} 天</span></div>
+                <div className="kv-item"><span className="kv-key">流转条件</span><span className="kv-val">{model.transitionCondition}</span></div>
+                <div className="kv-item"><span className="kv-key">阶段定义事件</span><span className="kv-val">{model.stageDefinitionEvent}</span></div>
+                <div className="kv-item"><span className="kv-key">回归条件</span><span className="kv-val">{model.regressionCondition}</span></div>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                {model.status === '已启用' && !atLast ? (
+                  <button className="btn primary" type="button" onClick={() => handleAdvance(model)}>
+                    推进到「{model.stages.find((s) => s.order === model.stageOrder + 1)?.name}」（v{model.version}→v{model.version + 1}）
                   </button>
+                ) : (
+                  <span className="muted">{atLast ? '已到末阶段，不可继续推进' : '模型未启用，暂不能推进'}</span>
+                )}
+              </div>
+              <h4>阶段推进历史（版本轨迹）</h4>
+              <ul className="timeline">
+                {model.stageHistory.map((record) => (
+                  <li key={`${record.order}-${record.version}`}>
+                    v{record.version} · 第 {record.order} 阶段「{record.stage}」 · {record.advancedAt}
+                  </li>
                 ))}
-              </td>
-            </tr>
-          ))}
-          {rows.length === 0 && (
-            <tr>
-              <td className="empty-state" colSpan={columns.length + 2}>暂无生命周期数据，可先登记生命周期模型</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+              </ul>
+            </article>
+          )
+        })}
+      </div>
 
-      <footer className="page-foot">
-        <span>共 {total} 条生命周期记录</span>
-        {errorMessage && <span className="error-text">{errorMessage}</span>}
-      </footer>
+      <div className="domain-panel">
+        <h3>② 实验分组成员（退出前分组不再残留为“在组”）</h3>
+        <p className="panel-sub">
+          这里按生命周期模型聚合其绑定方案的命中：在组命中显示当前分组；已退出命中保留原分组与退出时间，且不会因后续阶段推进变回在组。
+        </p>
+        {models.map((model) => {
+          const boundPlans = plans.filter((plan) => plan.lifecycleCode === model.modelCode)
+          const boundPlanIds = new Set(boundPlans.map((plan) => plan.id))
+          const modelHits = hits.filter((hit) => boundPlanIds.has(hit.planId))
+          const activeCount = modelHits.filter((hit) => hit.state === 'active').length
+          return (
+            <article key={model.id} className="domain-panel" style={{ background: '#fbfdff' }}>
+              <h4>
+                <span className="mono">{model.modelCode}</span> · {model.currentStage}
+                <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                  绑定 {boundPlans.map((p) => p.planCode).join('、') || '无方案'} · 在组 {activeCount} / 历史 {modelHits.length}
+                </span>
+              </h4>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>方案</th>
+                    <th>原分组（快照保留）</th>
+                    <th>命中时生命周期阶段</th>
+                    <th>快照版本</th>
+                    <th>成员状态</th>
+                    <th>退出时间</th>
+                    <th>退出原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modelHits.length === 0 && (
+                    <tr><td className="empty-state" colSpan={8}>该生命周期下暂无实验命中</td></tr>
+                  )}
+                  {modelHits.map((hit) => (
+                    <tr key={hit.id}>
+                      <td className="mono">{hit.userId}</td>
+                      <td className="mono">{hit.planCode}</td>
+                      <td><strong>{hit.groupKey}</strong></td>
+                      <td>{hit.lifecycleStage} <span className="muted">（命中时刻）</span></td>
+                      <td className="mono">方案 v{hit.planVersion} / 生命周期 v{hit.lifecycleVersion}</td>
+                      <td><HitStateBadge state={hit.state} /></td>
+                      <td>{hit.exitAt ?? '—'}</td>
+                      <td style={{ fontSize: 12 }}>{hit.exitReason ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </article>
+          )
+        })}
+      </div>
     </section>
   )
 }
